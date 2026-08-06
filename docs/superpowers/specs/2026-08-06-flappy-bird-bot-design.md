@@ -147,13 +147,14 @@ src/main/clone.js      live __game -> inert throwaway instance
 src/main/search.js     beam search over flap / no-flap
 src/main/hud.js        on-page overlay
 src/content/bridge.js  ISOLATED world — postMessage relay
-src/popup/popup.html   arm toggle, live stats
+src/popup/popup.html   arm toggle, auto-restart toggle, live stats
 src/popup/popup.js
 ```
 
 `src/main/*` is injected via `"world": "MAIN"` in `content_scripts`
-(requires Chrome 111+). The bridge relays only arm/disarm commands and stats
-between page and popup via `window.postMessage`.
+(requires Chrome 111+). The bridge relays arm/disarm commands, the auto-restart
+setting, and stats between page and popup via `window.postMessage`. That is the
+complete message contract; nothing else crosses the boundary.
 
 ### Clone
 
@@ -195,8 +196,9 @@ There is no plan-execution buffer and no skipped steps.
 **Budget.** Measured on the live page 2026-08-06: a clone plus one step costs
 **0.61 µs**; a bare step on an existing clone costs **0.15 µs**. A K = 24,
 D = 80 beam is ≈3,840 expansions ≈ **2.3 ms per re-plan**. That fits within a
-16.7 ms frame (60 Hz, the worst case) with wide margin, which is why searching
-every step is affordable and no cadence reduction is required.
+16.7 ms frame at 60 Hz, and still within 8.3 ms at 120 Hz, with wide margin
+either way — which is why searching every step is affordable and no cadence
+reduction is required.
 
 The live step rate was deliberately not measured: the game only steps during
 play, and the live instance is `netMode: "online"`, so starting a run to measure
@@ -242,6 +244,11 @@ All gated on the armed flag; disarming restores the original `step`.
 
 ### Budget overrun
 
+The search checks the clock **between depth levels** and narrows K in flight.
+Detection cannot happen after the fact — a tick that has already overrun is a
+frame that has already been missed — so the budget check is part of the search
+loop's structure, not a wrapper around it.
+
 Degradation reduces the beam width K for that tick and keeps the same algorithm.
 It never switches to a different policy. A narrower beam is still a search over
 the true dynamics and degrades smoothly; falling back to a hand-tuned reactive
@@ -275,8 +282,12 @@ a test fixes its seed by assigning `sim.nextSeed = <bigint>` *before* calling
 `beginRun()`. This is the only supported seeding mechanism; writing `runSeed`
 directly is overwritten by the next `beginRun()`.
 
-- **Benchmark mode** — run ~100 full games on fixed seeds; report a score
-  histogram. Beats the naive baseline of 1–2 or it is not working.
+- **Benchmark mode** — run ~100 games on fixed seeds; report a score histogram.
+  Beats the naive baseline of 1–2 or it is not working. **Each game must carry a
+  cutoff** (a max-step cap, or a target score), and reaching the cutoff counts as
+  a pass. A correct controller does not lose, so an uncapped benchmark hangs
+  exactly when the code is working — and at ~2.3 ms of search per step, even a
+  moderate game costs seconds of wall clock.
 - **Regression** — fixed seed implies fixed expected score; assert a threshold.
 - **Clone fidelity** — clone a live mid-run state, step both clone and original,
   assert identical `birdY` / `birdVy` / `pipes`.
