@@ -1,0 +1,14 @@
+{
+  "name": "flappy-fake",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0",
+    "vitest": "^2.0.0"
+  }
+}
