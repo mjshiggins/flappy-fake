@@ -1,6 +1,8 @@
 import { inspectGame } from './gameAccess.js';
 import { makeSimOps } from './simOps.js';
 import { Controller } from './controller.js';
+import { beamSearch } from './search.js';
+import { Planner } from './planner.js';
 import { D, R, K, PIPE_SPACING } from '../shared/constants.js';
 import { mountHud } from './hud.js';
 import { runBenchmark, sweepK, cloneFidelity, planReuseCost } from './benchmark.js';
@@ -32,6 +34,9 @@ function boot() {
   window.__flappyFake = {
     ops, Ctor: info.Ctor, controller, game,
     runBenchmark, sweepK, cloneFidelity, planReuseCost,
+    // exposed for diagnosis: reimplementing the search in a console snippet is
+    // error-prone (a double-release corrupts the clone pool silently)
+    beamSearch, Planner,
   };
 
   // Instance patch, NOT prototype: clones inside the search must not recurse.
