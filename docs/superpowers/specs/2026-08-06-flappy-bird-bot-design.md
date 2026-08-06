@@ -181,8 +181,10 @@ live PRNG state spawns the *actual* upcoming pipes.
 
 ### Search
 
-Beam search over per-step decisions. Only the first action is ever used; the loop
-re-plans continuously, so the controller is closed-loop.
+Beam search over per-step decisions. **The search runs on every simulation step,
+and only the first action of the resulting plan is ever used** — the plan is
+discarded and recomputed next step, making the controller fully closed-loop.
+There is no plan-execution buffer and no skipped steps.
 
 - Node: `{ clone, stepsAhead }`
 - Each node branches into `{ flap, no-flap }`; rank all successors; keep best K
@@ -190,9 +192,21 @@ re-plans continuously, so the controller is closed-loop.
 - Rank: alive first, then by `|birdY - gapY|` against the next unpassed pipe
 - If every branch dies, return the first action of the longest-surviving branch
 
-Starting budget: K = 24, beam depth D = 80 (≈3.8k `step()` calls per re-plan),
-re-planning every 3rd frame. These are tuning knobs to be measured against a real
-frame budget, not fixed architecture.
+**Budget.** Measured on the live page 2026-08-06: a clone plus one step costs
+**0.61 µs**; a bare step on an existing clone costs **0.15 µs**. A K = 24,
+D = 80 beam is ≈3,840 expansions ≈ **2.3 ms per re-plan**. That fits within a
+16.7 ms frame (60 Hz, the worst case) with wide margin, which is why searching
+every step is affordable and no cadence reduction is required.
+
+The live step rate was deliberately not measured: the game only steps during
+play, and the live instance is `netMode: "online"`, so starting a run to measure
+it would have produced a ranked, submitted score. The 60 Hz worst case is used
+instead, and the real figure should be recorded the first time the bot is armed.
+
+K and D are tuning knobs to be validated against measurement, not fixed
+architecture. Note that the dominant cost is cloning (0.61 µs), not stepping
+(0.15 µs), so a clone object pool is the first optimisation to reach for if the
+budget ever tightens — not a shallower search.
 
 ### Actuation
 
@@ -209,9 +223,10 @@ controller.
 
 ### Control loop by game state
 
-- `"getready"` — call `flap()` to start the run
-- `"play"` — plan and act each tick
-- `"gameover"` — optionally `restart()` if auto-restart is enabled
+- `"getready"` — call `live.flap()` to start the run
+- `"play"` — run the search, and call `live.flap()` if the chosen first action is
+  a flap. No other actuation path exists; `flap()` is the only input the bot uses
+- `"gameover"` — call `live.restart()` if the popup's auto-restart toggle is on
 
 All gated on the armed flag; disarming restores the original `step`.
 
@@ -222,8 +237,16 @@ All gated on the armed flag; disarming restores the original `step`.
 | `window.__game` absent or renamed | Feature detection at init | Refuse to arm; HUD error |
 | `flap` / `step` missing from prototype | Feature detection at init | Refuse to arm; HUD error |
 | Site ships new physics (`simVersion` bump) | Drift check | HUD warning; optional auto-disarm |
-| Search exceeds frame budget | Timing measurement | Fall back to reactive rule; never freeze |
+| Search exceeds frame budget | Timing measurement | Reduce beam width K for that tick; never freeze |
 | All search branches die | Search result | Longest-surviving branch |
+
+### Budget overrun
+
+Degradation reduces the beam width K for that tick and keeps the same algorithm.
+It never switches to a different policy. A narrower beam is still a search over
+the true dynamics and degrades smoothly; falling back to a hand-tuned reactive
+rule would mean falling back to something that scores 1–2, which is
+indistinguishable from a crash.
 
 ### Drift check
 
@@ -239,8 +262,21 @@ one — necessary because `Ctor` is reached through a hash-named bundle class.
 The controller is a pure function `(state) => boolean` over a deterministic,
 headless simulation, so correctness is measurable rather than eyeballed.
 
-- **Benchmark mode** — run ~100 full games on fixed seeds in a Web Worker;
-  report a score histogram. Beats the naive baseline of 1–2 or it is not working.
+**All tests run in the MAIN world on the page.** They cannot run in a Web Worker
+or in Node: the simulation class is obtained as
+`Object.getPrototypeOf(__game).constructor` from the live page, and a class
+cannot cross a `postMessage` boundary (structured clone rejects functions). The
+"runs headless and inert" finding was verified in the MAIN world specifically.
+Benchmark runs are therefore chunked across `requestAnimationFrame` callbacks so
+a long batch never blocks the page.
+
+**Imposing a seed.** `beginRun()` does `this.runSeed = this.nextSeed ?? gS()`, so
+a test fixes its seed by assigning `sim.nextSeed = <bigint>` *before* calling
+`beginRun()`. This is the only supported seeding mechanism; writing `runSeed`
+directly is overwritten by the next `beginRun()`.
+
+- **Benchmark mode** — run ~100 full games on fixed seeds; report a score
+  histogram. Beats the naive baseline of 1–2 or it is not working.
 - **Regression** — fixed seed implies fixed expected score; assert a threshold.
 - **Clone fidelity** — clone a live mid-run state, step both clone and original,
   assert identical `birdY` / `birdVy` / `pipes`.
@@ -257,6 +293,11 @@ headless simulation, so correctness is measurable rather than eyeballed.
 
 ## Out of scope
 
-Reinforcement learning or any trained controller; leaderboard interaction of any
-kind; support for Flappy Bird clones other than flappybird.io; pixel-based or
-vision-based state extraction.
+Reinforcement learning or any trained controller; support for Flappy Bird clones
+other than flappybird.io; pixel-based or vision-based state extraction.
+
+On the leaderboard specifically: no submission logic, no network calls to
+`/api/board/*` or the game server, and no suppression or interception of the
+site's own submissions. The read-only ranked-status HUD indicator described under
+"Leaderboard decision" is explicitly **in** scope — it is the one retained
+mitigation and must not be dropped.
