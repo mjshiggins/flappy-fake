@@ -114,6 +114,42 @@ Measured on a headless instance at `dt = 1/120`:
 
 The 201-step spacing sets the required lookahead horizon. See "Search".
 
+### Difficulty ramp is bounded, and the game becomes stationary
+
+`halfGap` comes from `Jy(simVersion, spawnCount)`:
+
+```js
+function Jy(l, i) { return l < 2 ? gf : (i < vf.length ? vf[i] : gf) }
+```
+
+`vf` is a lookup table, not a formula. Measured by driving `advancePipes()` on a
+headless instance with no bird:
+
+```
+vf = [325058, 309330, 293601, 277872, 262144]   (−15728 per pipe)
+gf = 246415                                     (floor, forever after)
+```
+
+The ramp lasts exactly **5 pipes**, then `halfGap` is constant at 246415 — 75.8%
+of the opening gap. Pipe spacing is constant at 201 steps throughout.
+
+**Therefore the game is stationary from spawn 5 onward.** Both difficulty
+parameters are fixed; only `gapY` continues to vary, drawn from the PRNG. Three
+consequences:
+
+- The search must be tuned against the **floor** `halfGap = 246415`, never the
+  opening 325058. Early pipes are the easy case.
+- The horizon invariant rests on the 201-step spacing, which is now confirmed
+  constant for all pipes rather than measured only on the opening few.
+- A benchmark cutoff is **principled evidence**, not a pragmatic compromise: past
+  pipe ~6 every pipe presents identical parameters, so a controller that clears
+  20 is in the same regime it would face at 20,000.
+
+The remaining variation is vertical — consecutive `gapY` draws can demand a large
+climb or descent between adjacent gaps. That, not difficulty escalation, is where
+a hard case lives, and it is bounded by the `gapY` range and directly
+constructible as a test.
+
 ### Tab visibility
 
 The game does not advance while the tab is hidden: `visibilitychange` handling
@@ -125,7 +161,7 @@ in a background tab.
 
 ### A fresh instance runs headless and inert
 
-Verified: `new Ctor(0)` followed by `beginRun()` and repeated `step(0.05)` runs a
+Verified: `new Ctor(0)` followed by `beginRun()` and repeated `step(1/120)` runs a
 complete game — pipes spawn, score increments, `state` reaches `"gameover"`,
 `deathCause` populates (`"pipeTop"` / `"pipeBottom"`). The instance reports
 `isRanked === false` and performs no network activity.
@@ -249,45 +285,91 @@ derived from the incorrect 0.05 timestep and covers only 40% of a spacing.
 
 ### Plan-and-verify, not search-every-step
 
-**The plan is computed once and executed over many steps.** Re-planning every
-step is not merely unaffordable — it is redundant.
+**A plan is computed once and executed for a bounded interval R.** Plan reuse is
+an affordability argument over a bounded window — *not* a claim that re-planning
+is redundant.
 
-The forward model is *exact*. The clone carries live PRNG state, so the search
-observes the true future, and nothing external perturbs the simulation between
-steps. A plan optimal at step *T* is therefore still optimal at *T+1*; a
-per-step re-plan recomputes a bit-identical answer at full cost.
+An earlier revision justified reuse by arguing the forward model is exact, so a
+plan optimal at step *T* is still optimal at *T+1*. **That reasoning is wrong**
+and is recorded here so it is not reintroduced. It invokes Bellman's principle of
+optimality, which applies to subproblems of the same problem. The search at *T*
+optimises over `[T, T+D]` against a terminal heuristic; the search at *T+1*
+optimises over `[T+1, T+1+D]`. This is a *receding horizon*: the tail of the *T*
+plan was scored against a boundary the *T+1* search sees past. Exactness
+guarantees the predicted state trajectory is correct; it guarantees nothing about
+the truncated objective being invariant. Nothing-external-perturbs is necessary,
+not sufficient. Model-predictive control re-plans continuously for this reason
+despite having exact models.
 
-The drift check (below) is what licenses this. It is not a diagnostic here — it
-is the correctness guard. If prediction and reality ever disagree, the exactness
-premise has failed and the plan is immediately discarded.
+### The horizon invariant
+
+Every executed action must be backed by at least one full pipe spacing of
+lookahead. An action executed at offset *r* into a D-step plan was chosen with
+only `D − r` steps of remaining lookahead, so:
+
+> **R ≤ D − 201**
+
+With D = 240 this gives **R ≤ 39 steps** (~325 ms). Reusing a plan for longer
+puts its tail in exactly the blind-greedy regime that "Horizon" above forbids —
+the failure would look like an inexplicable death near a gap, not like a budget
+problem.
+
+R, D, and K trade off against each other under this constraint:
+
+| D | R (= D − 201) | Expansions (K=24) | Burst | Amortised |
+|---|---|---|---|---|
+| 240 | 39 | 11,520 | ~7.0 ms | ~2.2% core |
+| 440 | 239 | 21,120 | ~12.9 ms | ~0.65% core |
+
+Larger D amortises better but bursts harder, and the burst is synchronous inside
+a frame (see Budget). Halving K halves both. Starting point: **D = 240, R = 39,
+K = 24**, with the invariant as the hard constraint and the rest tuned against
+the benchmark.
 
 Re-plan when, and only when:
 
-- the plan falls below a low-water mark of remaining steps (re-plan early, so
-  there is always runway and re-plans stay staggered)
+- R steps have elapsed since the last plan (the horizon invariant)
 - the drift check fires
 - the run state changes (new run, `restart()`)
+
+Plan-and-verify still clearly beats per-step search. Holding the invariant, an
+every-step search must keep D ≥ 201 at ~1 ms/step, which forces K ≈ 4 — a beam
+too narrow to trust. Reuse buys beam quality with the CPU it saves.
 
 **Budget.** Measured 2026-08-06: clone plus one step **0.61 µs**; bare step
 **0.15 µs**. A K = 24, D = 240 beam is ≈11,520 expansions ≈ **7 ms per search**.
 
 At 120 steps/s, searching every step would cost ~840 ms per second of wall clock
-— 84% of a core, and unshippable. Under plan-and-verify the same search runs
-roughly once per 180 steps (~1.5 s), amortising to well under 1% of a core. The
-per-step cost in steady state is one clone, one step, and one comparison for the
-drift check.
+— 84% of a core, and unshippable. Under plan-and-verify at R = 39 the search runs
+once per ~325 ms, amortising to **~2.2% of a core**. The per-step cost in steady
+state is one clone, one step, and one comparison for the drift check.
 
-Because the 7 ms search is bursty rather than continuous, it must not land inside
-a frame that also owes 2 accumulator steps. Re-planning at a low-water mark
-rather than at exhaustion is what gives the scheduler slack to place it.
+**The 7 ms burst is synchronous and unavoidably inside a frame.** The controller
+runs only from `controller.tick`, which runs inside the patched `live.step`,
+which is called only from the accumulator's batch loop inside a rAF frame. There
+is no execution opportunity outside a frame, and staggering re-plans only chooses
+*which* step pays the cost — it does not move the cost out of the frame. Two
+options, and the plan must pick one explicitly:
+
+- **(a) Accept the burst.** 7 ms lands alongside ~2 sim steps and a render inside
+  16.7 ms. Tight but survivable, and the fixed-timestep accumulator makes it
+  safe: an overrun frame is not corrupting, the accumulator simply runs more
+  steps on the next frame and the controller is still invoked for every one.
+  The cost is occasional visual jank, not incorrect play.
+- **(b) Incremental search.** Spread one search across several frames using the
+  R-step runway. Removes the jank, but requires resumable beam state and
+  partial-plan bookkeeping — a materially different search implementation.
+
+**Start with (a)**, measure jank in the benchmark, and escalate to (b) only if it
+is visible. Halving K to 12 (~3.5 ms) is the cheaper intermediate move.
 
 **Clone pooling is required, not optional.** Cloning (0.61 µs) dominates stepping
 (0.15 µs) by 4×, so the search cost is mostly allocation. A pool of reusable
 clone objects is the highest-leverage optimisation available and should be built
 in from the start rather than retrofitted if the budget tightens.
 
-K and D remain tuning knobs to be validated against the benchmark, not fixed
-architecture.
+K and D remain tuning knobs to be validated against the benchmark, subject to the
+horizon invariant. They are not fixed architecture.
 
 ### Actuation
 
@@ -353,18 +435,30 @@ indistinguishable from a crash.
 Each tick, compare the clone's predicted `birdY` after one step against the value
 the live game actually produces. These should agree exactly.
 
-The check carries two distinct jobs:
+**Order matters.** The prediction must apply the planned action before stepping:
+clone the live state, apply the action the plan calls for on this step, step the
+clone, and compare against the live game on the following tick. `flap()` changes
+`birdVy`, so a clone stepped *without* the planned flap diverges on every flap
+step — which, with auto-disarm on persistent drift, yields a bot that constantly
+disarms itself.
 
-1. **Correctness guard for plan reuse.** Plan-and-verify is sound only while the
-   forward model is exact. The drift check is the test of that premise, run every
-   step. On divergence the plan is discarded immediately and a re-plan is forced.
-   Without this check, reusing a plan would be an assumption; with it, the
-   assumption is continuously verified. This is why the per-step cost is one
-   clone and one step rather than zero — the verification is the point.
-2. **Site-update detection.** Divergence also means the game's physics changed
+**What the check does and does not guard.** It compares one-step-ahead predicted
+`birdY` against reality, so it tests **physics fidelity only**:
+
+1. **Exactness premise.** Divergence means the clone no longer reproduces the
+   game — the forward model is wrong, so both the plan and any new search would
+   be wrong. Discard the plan and force a re-plan.
+2. **Site-update detection.** The same signal means the game's physics changed
    underneath us. Surfaced in the HUD rather than allowed to degrade play
    silently — necessary because `Ctor` is reached through a hash-named bundle
    class that any deploy may rename.
+
+It does **not** guard plan quality. A perfectly exact model reproduces the
+trajectory flawlessly while a stale plan steers into a pipe it was never deep
+enough to see; the drift check passes silently throughout. Plan quality is
+guarded separately and structurally, by the horizon invariant `R ≤ D − 201`.
+An earlier revision described this check as "the correctness guard" licensing
+plan reuse. It is not, and cannot be.
 
 Persistent drift (divergence on consecutive steps, rather than a one-off) should
 disarm rather than thrash between re-plans that all immediately fail.
@@ -395,11 +489,32 @@ directly is overwritten by the next `beginRun()`.
   exactly when the code is working. Budget the cap deliberately: at 120 steps/s,
   a score of 50 is ~10,000 steps, and every step costs a clone plus a step for
   the drift check even when no re-plan is triggered.
-- **Plan-reuse equivalence** — the load-bearing claim of plan-and-verify is that
-  re-planning every step yields the same actions as executing a cached plan.
-  Assert it directly: run a seed under both policies and require identical action
-  sequences. If this fails, the exactness premise is wrong and the whole design
-  needs revisiting.
+
+  A modest cutoff is defensible here rather than merely convenient: the game is
+  stationary past spawn 5 (see "Difficulty ramp is bounded"), so clearing ~20
+  pipes exercises the same parameters the controller faces indefinitely.
+- **Adversarial vertical delta** — stationarity means the remaining hard case is
+  a large `gapY` change between adjacent pipes. Construct that case directly
+  (maximum climb and maximum descent between consecutive gaps at the floor
+  `halfGap`) rather than waiting for the PRNG to produce it. This is the test
+  most likely to expose an insufficient horizon.
+- **Plan-reuse cost** — assert the thing that matters: plan reuse at interval R
+  costs no *score* against a per-step-re-plan reference, across N seeds.
+
+  Do **not** assert identical action sequences. They will differ, for two reasons
+  that have nothing to do with model exactness. First, the receding horizon: the
+  *T* and *T+1* searches optimise over different windows against a terminal
+  heuristic. Second, beam suboptimality: at *T* the K slots are shared across
+  descendants of both the flap and no-flap subtrees, while at *T+1*, rooted at
+  the state actually reached, all K slots go to that subtree — so *T+1* explores
+  branches that *T* pruned. An action-identity test would fail on a healthy
+  implementation and send an implementer chasing a non-existent bug.
+- **Horizon invariant** — a unit test asserting `R ≤ D − 201` for the configured
+  constants, so the relationship cannot be silently broken by later tuning.
+- **Score versus K** — the benchmark should sweep K and report the score curve.
+  In-flight K narrowing under load (see "Budget overrun") assumes degradation is
+  gentle; if K = 24 sits near a quality cliff, narrowing under load is a much
+  bigger deal than "degrades smoothly" and the degradation policy needs rethinking.
 - **Regression** — fixed seed implies fixed expected score; assert a threshold.
 - **Clone fidelity** — clone a live mid-run state, step both clone and original,
   assert identical `birdY` / `birdVy` / `pipes`.
@@ -411,12 +526,16 @@ directly is overwritten by the next `beginRun()`.
 - The beam ranking heuristic could prune the uniquely correct branch. The
   benchmark is how this would be detected; beam width is the mitigation.
 - Plan-and-verify rests on the forward model being exact. The drift check guards
-  it at runtime and the plan-reuse equivalence test guards it at build time, but
-  if some input to the simulation is not captured by the clone, both the plan and
-  the search would be wrong together and agree with each other. The clone
-  fidelity test over a long horizon is the defence.
-- K = 24 and D = 240 are unvalidated starting values. D = 240 is grounded in the
-  measured 201-step pipe spacing; K = 24 is a guess pending the benchmark.
+  it at runtime, but if some input to the simulation is not captured by the
+  clone, the plan and the search would be wrong together and agree with each
+  other. The clone fidelity test over a long horizon is the defence.
+- ~~Spacing may vary with `spawnCount`, invalidating D and R.~~ **Resolved:**
+  spacing is constant at 201 for all pipes; `halfGap` ramps over 5 pipes and then
+  plateaus. See "Difficulty ramp is bounded".
+- K = 24 is an unvalidated guess pending the benchmark's score-versus-K sweep.
+- The search must be validated at the floor `halfGap = 246415`. A controller
+  tuned only on the opening pipes would be tuned on 32% wider gaps than it faces
+  for the rest of the run.
 - `Ctor` is obtained via `Object.getPrototypeOf(__game).constructor`, a
   hash-named bundle class. Covered by feature detection plus the drift check.
 - `"world": "MAIN"` requires Chrome 111+.
