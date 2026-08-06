@@ -3,7 +3,7 @@
 // this module still never references `window` directly; it receives the
 // game constructor as an argument, so it stays Node-testable.
 
-import { DT } from '../shared/constants.js';
+import { DT, PIPE_CLEAR_X } from '../shared/constants.js';
 import { ClonePool } from './clonePool.js';
 
 const SCALARS = [
@@ -35,7 +35,15 @@ export function makeSimOps(Ctor, { dt = DT } = {}) {
     isDead: (c) => c.state === 'gameover',
     birdY: (c) => c.birdY,
     rank(c) {
-      const p = c.pipes.find((q) => !q.passed);
+      // Select by PHYSICAL CLEARANCE, not by `passed`. `passed` is a scoring
+      // flag set the instant a pipe reaches x <= 0, but the pipe has width and
+      // the bird stays between its jaws for a further ~250000 of travel.
+      // Targeting `!passed` retargets to the next pipe — far away, unrelated
+      // gapY — while the bird is still inside the current one, and steers it
+      // into the pipe it just scored. That is a wrong objective, not a weak
+      // one: beam search prunes the surviving branch at every level, so no
+      // amount of beam width or horizon rescues it.
+      const p = c.pipes.find((q) => q.x > PIPE_CLEAR_X);
       return p ? Math.abs(c.birdY - p.gapY) : Math.abs(c.birdY);
     },
   };

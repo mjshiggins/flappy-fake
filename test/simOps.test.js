@@ -55,3 +55,36 @@ describe('makeSimOps', () => {
     expect(o.birdY(c)).not.toBe(0);
   });
 });
+
+describe('rank target selection', () => {
+  // `passed` is a SCORING flag, set the instant a pipe reaches x <= 0. The pipe
+  // still has width, so the bird stays physically between its jaws for many
+  // steps afterwards. Selecting the target by `!passed` retargets to the next
+  // pipe — a million units away, with an unrelated gapY — while the bird is
+  // still inside the current one, and drives it straight into the jaws it just
+  // cleared. Target selection must use physical clearance, not scoring.
+  const state = (birdY, pipes) => Object.assign(new StubGame(), { birdY, pipes });
+
+  it('keeps targeting a scored pipe while the bird is still inside it', () => {
+    const o = ops();
+    const justScored = { x: -100, gapY: 1000, halfGap: 500, passed: true };
+    const nextPipe = { x: 900000, gapY: 999999, halfGap: 500, passed: false };
+    const c = state(1000, [justScored, nextPipe]);
+    // Bird sits exactly in the scored pipe's gap: that is the correct place to
+    // be, so rank must read as ideal (0), not as "miles from the next pipe".
+    expect(o.rank(c)).toBe(0);
+  });
+
+  it('advances to the next pipe once the bird is physically clear', () => {
+    const o = ops();
+    const longGone = { x: -900000, gapY: 1000, halfGap: 500, passed: true };
+    const upcoming = { x: 400000, gapY: 7000, halfGap: 500, passed: false };
+    const c = state(1000, [longGone, upcoming]);
+    expect(o.rank(c)).toBe(6000);   // distance to the upcoming pipe, not 0
+  });
+
+  it('falls back to centring when no pipe is in range', () => {
+    const o = ops();
+    expect(o.rank(state(250, []))).toBe(250);
+  });
+});

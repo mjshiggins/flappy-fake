@@ -100,6 +100,12 @@ export function cloneFidelity(Ctor, ops, { steps = 2000, minCompared = 500 } = {
   const c = ops.cloneFrom(live);
   let compared = 0;
   for (let i = 0; i < steps; i++) {
+    // Keep FLYING during the comparison. Stepping both without a controller
+    // free-falls the bird into the ground in ~82 steps, so the loop measures a
+    // corpse and reports a near-empty comparison. The same action must go to
+    // both so any divergence is the clone's fault, not a different input.
+    const action = planner.nextAction(live);
+    if (action) { live.flap(); ops.flap(c); }
     live.step(DT); ops.step(c);
     compared += 1;
     if (live.birdY !== ops.birdY(c) || live.birdVy !== c.birdVy) {
