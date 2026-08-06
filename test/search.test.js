@@ -46,4 +46,18 @@ describe('beamSearch', () => {
     const r = beamSearch(ops.initial(), ops, { K: 4, D: 15 });
     expect(r.actions.length).toBeLessThanOrEqual(15);
   });
+
+  it('releases every outstanding clone, including the surviving beam', () => {
+    // fakeSim's own release() is a no-op, so it can't detect a leak on its
+    // own: wrap it with a counter that tracks cloneFrom/release calls.
+    const base = makeFakeOps();
+    let outstanding = 0;
+    const counting = {
+      ...base,
+      cloneFrom: (s) => { outstanding += 1; return base.cloneFrom(s); },
+      release: (s) => { outstanding -= 1; base.release(s); },
+    };
+    beamSearch(counting.initial(), counting, { K: 8, D: 30 });
+    expect(outstanding).toBe(0);
+  });
 });

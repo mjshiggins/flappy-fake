@@ -36,7 +36,15 @@ export function beamSearch(rootState, ops, { K, D, deadline = null, now = () => 
     beam = next.slice(0, width);
     best = beam[0];
   }
-  return { actions: unwind(best), exhausted: false, depth: D };
+  // Loop completed without exhausting the beam: `beam` still holds the final
+  // surviving states (K of them) and must be released before returning.
+  // `best` is beam[0] itself, so releasing `beam` covers it exactly once —
+  // no double release. unwind() only walks action/parent pointers, never
+  // state, so computing actions before releasing (or after) is equally safe;
+  // it is done first here for clarity.
+  const actions = unwind(best);
+  for (const node of beam) ops.release(node.state);
+  return { actions, exhausted: false, depth: D };
 }
 
 function unwind(node) {
