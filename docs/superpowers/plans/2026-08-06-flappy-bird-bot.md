@@ -1104,6 +1104,9 @@ export class Controller {
 
     const action = this.planner.nextAction(live, { drift, stateChanged });
     if (action) this.api.flap();
+    // predict() flaps its own clone again with the same action. That is correct,
+    // not a double-flap bug: flap() assigns birdVy absolutely rather than adding
+    // an impulse, so applying it to the clone reproduces the live state exactly.
     this.drift.predict(live, action);
   }
 }
@@ -1149,6 +1152,7 @@ await build({ ...common, entryPoints: ['src/popup/popup.js'], outfile: 'dist/pop
   "version": "0.1.0",
   "description": "Plays flappybird.io by searching the game's own simulation.",
   "minimum_chrome_version": "111",
+  "host_permissions": ["https://flappybird.io/*"],
   "content_scripts": [
     {
       "matches": ["https://flappybird.io/*"],
@@ -1254,15 +1258,25 @@ window.addEventListener('message', (ev) => {
 });
 ```
 
-- [ ] **Step 5: Build and verify output exists**
+- [ ] **Step 5: Create `src/main/hud.js` and `src/popup/popup.js` before building**
+
+`index.js` imports `./hud.js`, and `build.mjs` declares `src/popup/popup.js` as an
+entry point. **esbuild aborts on unresolved imports**, so both files must exist
+before the build can succeed. Their full contents are in Task 12 — create them
+now (Task 12 then only adds `popup.html` and does the manual load test).
+
+- [ ] **Step 6: Build and verify output exists**
 
 Run: `npm run build && ls -la dist/`
-Expected: `dist/main.js`, `dist/bridge.js` present, no esbuild errors.
+Expected: `dist/main.js`, `dist/bridge.js`, `dist/popup.js` present, no esbuild errors.
 
-- [ ] **Step 6: Commit**
+If esbuild reports an unresolved import, a file from Task 12 is still missing —
+create it rather than stubbing it out.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add build.mjs manifest.json src/main/index.js src/content/bridge.js
+git add build.mjs manifest.json src/main/index.js src/content/bridge.js src/main/hud.js src/popup/popup.js
 git commit -m "feat: add MV3 manifest, build, and MAIN-world entry point"
 ```
 
@@ -1289,11 +1303,12 @@ export function mountHud() {
   document.body.appendChild(el);
 
   return {
-    update({ armed, status, score, isRanked, replans }) {
+    update({ armed, status, score, isRanked, replans, driftEvents = 0 }) {
       el.textContent = [
         `${armed ? '● ARMED' : '○ idle'}   score ${score}`,
         `${isRanked ? '⚠ RANKED — this run submits' : 'unranked'}`,
-        `replans ${replans}   ${status}`,
+        `replans ${replans}${driftEvents ? `   ⚠ drift x${driftEvents}` : ''}`,
+        status,
       ].join('\n');
       el.style.borderLeft = isRanked ? '3px solid #e5484d' : '3px solid #30a46c';
     },
@@ -1372,14 +1387,18 @@ These cannot run in Node or a Worker: the simulation class comes from the live p
 import { DT, PIPE_SPACING, HALF_GAP_FLOOR } from '../shared/constants.js';
 import { Planner } from './planner.js';
 
+/** Yield to the event loop so a long batch never blocks the page (spec: rAF chunking). */
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
 /**
  * Cutoff is principled, not merely pragmatic: the game is stationary past
  * spawn 5 (halfGap plateaus at 246415, spacing constant at 201), so clearing
  * ~20 pipes exercises the same parameters the controller faces indefinitely.
  */
-export function runBenchmark(Ctor, ops, { games = 20, maxScore = 25, maxSteps = 20000, K, D, R } = {}) {
+export async function runBenchmark(Ctor, ops, { games = 20, maxScore = 25, maxSteps = 20000, K, D, R } = {}) {
   const results = [];
   for (let i = 0; i < games; i++) {
+    await nextFrame();                   // chunk across frames; never block the page
     const sim = new Ctor(0);
     sim.nextSeed = BigInt(i + 1);        // seeding: nextSeed BEFORE beginRun
     sim.beginRun();
@@ -1405,51 +1424,140 @@ export function runBenchmark(Ctor, ops, { games = 20, maxScore = 25, maxSteps = 
 }
 
 /** Sweep K so the in-flight narrowing policy is measured, not assumed gentle. */
-export function sweepK(Ctor, ops, opts, ks = [4, 8, 16, 24, 32]) {
-  return ks.map((K) => ({ K, ...runBenchmark(Ctor, ops, { ...opts, K }) }));
+export async function sweepK(Ctor, ops, opts, ks = [4, 8, 16, 24, 32]) {
+  const out = [];
+  for (const K of ks) out.push({ K, ...(await runBenchmark(Ctor, ops, { ...opts, K })) });
+  return out;
+}
+
+/**
+ * The spec's load-bearing evidence for plan-and-verify: reuse at interval R must
+ * cost no SCORE against a per-step-re-plan reference.
+ *
+ * Deliberately does NOT compare action sequences. They legitimately differ —
+ * the search uses a receding horizon, and beam search allocates its K slots
+ * differently at T than at T+1. An action-identity assertion fails on correct
+ * code and would send an implementer chasing a bug that does not exist.
+ */
+export async function planReuseCost(Ctor, ops, { seeds = 10, maxScore = 25, maxSteps = 20000, K, D, R } = {}) {
+  const play = (seed, replanInterval) => {
+    const sim = new Ctor(0);
+    sim.nextSeed = BigInt(seed); sim.beginRun(); sim.flap();
+    const planner = new Planner(ops, { K, D, R: replanInterval, pipeSpacing: PIPE_SPACING });
+    let steps = 0;
+    while (steps < maxSteps && sim.state !== 'gameover' && sim.score < maxScore) {
+      if (planner.nextAction(sim)) sim.flap();
+      sim.step(DT);
+      steps += 1;
+    }
+    return sim.score;
+  };
+
+  const rows = [];
+  for (let s = 1; s <= seeds; s++) {
+    await nextFrame();
+    rows.push({ seed: s, reuse: play(s, R), perStep: play(s, 1) });
+  }
+  const regressions = rows.filter((r) => r.reuse < r.perStep);
+  return { rows, ok: regressions.length === 0, regressions };
 }
 
 /** Clone fidelity over a long horizon: the defence against an incomplete clone. */
-export function cloneFidelity(Ctor, ops, steps = 2000) {
+export function cloneFidelity(Ctor, ops, { steps = 2000, minCompared = 500 } = {}) {
   const live = new Ctor(0);
   live.nextSeed = 99n; live.beginRun(); live.flap();
-  for (let i = 0; i < 300; i++) live.step(DT);      // reach a mid-run state
+
+  // Reach a mid-run state while STAYING ALIVE. An uncontrolled fall reaches
+  // gameover in well under 300 steps, after which the comparison loop breaks
+  // immediately and reports a vacuous pass. Keep the bird flying.
+  const planner = new Planner(ops, { K: 8, D: 240, R: 39, pipeSpacing: PIPE_SPACING });
+  for (let i = 0; i < 300; i++) {
+    if (planner.nextAction(live)) live.flap();
+    live.step(DT);
+  }
+  if (live.state === 'gameover') {
+    return { ok: false, reason: 'bird died before the clone was taken; nothing was compared' };
+  }
+
   const c = ops.cloneFrom(live);
+  let compared = 0;
   for (let i = 0; i < steps; i++) {
     live.step(DT); ops.step(c);
-    if (live.birdY !== ops.birdY(c)) return { ok: false, divergedAt: i, live: live.birdY, clone: ops.birdY(c) };
+    compared += 1;
+    if (live.birdY !== ops.birdY(c) || live.birdVy !== c.birdVy) {
+      return { ok: false, divergedAt: i, field: live.birdY !== ops.birdY(c) ? 'birdY' : 'birdVy',
+               live: live.birdY, clone: ops.birdY(c) };
+    }
+    if (live.pipes.length !== c.pipes.length) return { ok: false, divergedAt: i, field: 'pipes.length' };
+    for (let p = 0; p < live.pipes.length; p++) {
+      if (live.pipes[p].x !== c.pipes[p].x || live.pipes[p].gapY !== c.pipes[p].gapY) {
+        return { ok: false, divergedAt: i, field: `pipes[${p}]` };
+      }
+    }
     if (live.state === 'gameover') break;
   }
-  return { ok: true, steps };
+  // A pass must be earned: too few compared steps proves nothing.
+  if (compared < minCompared) {
+    return { ok: false, reason: `only ${compared} steps compared, need >= ${minCompared}`, compared };
+  }
+  return { ok: true, compared };
 }
 ```
 
 - [ ] **Step 2: Expose the harness from `src/main/index.js`**
 
-Add inside `boot()`, after `ops` is created:
+`index.js` must **import** the harness — without this the console snippets below
+reference `undefined` and every step of Tasks 13–14 fails.
+
+At the top of `src/main/index.js`:
 
 ```js
-window.__flappyFake = { ops, Ctor: info.Ctor, controller, game };
+import { runBenchmark, sweepK, cloneFidelity, planReuseCost } from './benchmark.js';
+```
+
+And inside `boot()`, after `ops` is created:
+
+```js
+window.__flappyFake = {
+  ops, Ctor: info.Ctor, controller, game,
+  runBenchmark, sweepK, cloneFidelity, planReuseCost,
+};
 ```
 
 - [ ] **Step 3: Run clone fidelity on the live page**
 
-Build, reload the extension, open https://flappybird.io/ in a **visible** tab, and in the console:
+Build, reload the extension, open https://flappybird.io/ in a **visible** tab
+(a hidden tab suspends rAF and freezes the game), and in the console:
 
 ```js
-const { runBenchmark, sweepK, cloneFidelity } = window.__flappyFake;
-cloneFidelity(window.__flappyFake.Ctor, window.__flappyFake.ops);
+const ff = window.__flappyFake;
+ff.cloneFidelity(ff.Ctor, ff.ops);
 ```
 
-Expected: `{ ok: true, steps: 2000 }`. If it reports `divergedAt`, the clone is missing a field — add it to `SCALARS` in `simOps.js` and re-run before proceeding. **Do not continue past a failing fidelity check**; every downstream result depends on it.
+Expected: `{ ok: true, compared: <>= 500> }`.
 
-- [ ] **Step 4: Run the benchmark**
+Read the result carefully — this gate is only meaningful if it *can* fail:
+- `ok: false, reason: 'bird died before the clone was taken'` → the harness never
+  compared anything. Not a pass.
+- `ok: false, reason: 'only N steps compared'` → too little evidence. Not a pass.
+- `ok: false, divergedAt, field` → the clone is missing state. Add the field to
+  `SCALARS` in `simOps.js` and re-run.
+
+**Do not continue past anything other than `ok: true` with a real `compared` count.** Every downstream result assumes the clone is exact.
+
+- [ ] **Step 4: Run the benchmark and the plan-reuse-cost check**
 
 ```js
-runBenchmark(window.__flappyFake.Ctor, window.__flappyFake.ops, { K: 24, D: 240, R: 39 });
+await ff.runBenchmark(ff.Ctor, ff.ops, { K: 24, D: 240, R: 39 });
+await ff.planReuseCost(ff.Ctor, ff.ops, { K: 24, D: 240, R: 39 });
 ```
 
-Expected: `min` well above the naive baseline of 1–4, and `cutoffRate` near 1.0. A `cutoffRate` of 1.0 means every game hit the score cap alive — the target outcome.
+Benchmark expected: `min` well above the naive baseline of 1–4, `cutoffRate` near
+1.0 (every game hit the score cap alive — the target outcome).
+
+Plan-reuse expected: `ok: true`. A non-empty `regressions` array means plan reuse
+at R is costing score against per-step re-planning, which invalidates the
+plan-and-verify design decision — stop and report it rather than tuning around it.
 
 - [ ] **Step 5: Commit**
 
@@ -1464,7 +1572,38 @@ git commit -m "feat: add in-page benchmark, K sweep, and clone fidelity harness"
 
 - [ ] **Step 1: Confirm the adversarial vertical case**
 
-Stationarity means the remaining hard case is a large `gapY` change between adjacent pipes at the floor `halfGap`. In the console, construct a sim with two consecutive gaps at the extremes of the `gapY` range and confirm the controller clears it. This is the case most likely to expose an insufficient horizon.
+Stationarity means the remaining hard case is a large `gapY` change between
+adjacent pipes at the floor `halfGap`. Do not wait for the PRNG to produce it —
+construct it directly by overriding `nextGapY` on the instance, which is how the
+game places each new gap.
+
+First discover the actual range (the plan does not assume one):
+
+```js
+const ff = window.__flappyFake;
+const probe = new ff.Ctor(0); probe.nextSeed = 7n; probe.beginRun();
+probe.playStep = 200;
+const ys = [];
+for (let i = 0; i < 4000 && ys.length < 200; i++) {
+  const n = probe.pipes.length;
+  probe.advancePipes();
+  if (probe.pipes.length > n) ys.push(probe.pipes.at(-1).gapY);
+  if (probe.pipes.length > 8) probe.pipes.shift();
+}
+const [lo, hi] = [Math.min(...ys), Math.max(...ys)];
+```
+
+Then force gaps to alternate between the extremes and play it:
+
+```js
+const sim = new ff.Ctor(0); sim.nextSeed = 1n; sim.beginRun(); sim.flap();
+let k = 0;
+sim.nextGapY = () => (k++ % 2 === 0 ? lo : hi);   // worst-case vertical swing
+```
+
+Drive it with a `Planner` exactly as `runBenchmark` does and confirm it clears at
+least 10 alternating gaps. Failure here means the horizon is too short — raise D
+(and R with it, preserving `R <= D - 201`) rather than widening K.
 
 - [ ] **Step 2: Run the K sweep and record the score curve**
 
@@ -1490,6 +1629,16 @@ git commit -m "perf: tune beam width and record measured step rate"
 ```
 
 ---
+
+## Known divergences from the spec (deliberate)
+
+- The spec says "disarming restores the original `step`." `index.js` instead
+  leaves the instance patch installed permanently and gates on `controller.armed`.
+  Functionally equivalent, and it avoids a patch/unpatch race if the user toggles
+  arming mid-frame. Recorded so it is not later "fixed" as a bug.
+- `runBenchmark` defaults to 20 games rather than the spec's ~100, to keep an
+  interactive console run to a sensible duration. Raise it for a real
+  characterisation run.
 
 ## Notes for the implementer
 
