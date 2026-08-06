@@ -4,20 +4,12 @@
   "version": "0.1.0",
   "description": "Plays flappybird.io by searching the game's own simulation.",
   "minimum_chrome_version": "111",
-  "host_permissions": ["https://flappybird.io/*"],
   "content_scripts": [
     {
       "matches": ["https://flappybird.io/*"],
       "js": ["dist/main.js"],
       "world": "MAIN",
       "run_at": "document_idle"
-    },
-    {
-      "matches": ["https://flappybird.io/*"],
-      "js": ["dist/bridge.js"],
-      "world": "ISOLATED",
-      "run_at": "document_idle"
     }
-  ],
-  "action": { "default_popup": "src/popup/popup.html" }
+  ]
 }
