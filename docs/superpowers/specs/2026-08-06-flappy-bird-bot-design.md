@@ -68,11 +68,60 @@ from the bird**. Controller input needs no transformation.
 and per-run recording into `flaps[]` / `passSteps[]`. `nextGapY()` draws from
 `prng`, so pipe placement is fully determined by PRNG state.
 
-### Timestep
+### Timestep and drive loop
 
-`dt = 0.05` matches the observed `elapsed` increment and the `dS = .05` constant
-in the bundle. Verified empirically: stepping a fresh instance at `0.05`
-produces coherent pipe motion and scoring; `1/60` does not.
+**`dt = 1/120`.** The bundle defines `Uf = 1/120` (and `Aa = 1/120` for ghost
+replay). The simulation advances at **120 steps per second**.
+
+An earlier revision of this spec incorrectly used `dt = 0.05`, inferred from the
+unrelated animation constant `dS = .05`. That is a 6× error and every number
+derived from it was wrong. Corrected throughout.
+
+The game is driven by a fixed-timestep accumulator inside a rAF loop:
+
+```js
+frame = i => {
+  const s = (i - this.lastTime) / 1e3;
+  this.lastTime = i;
+  if (this.paused) this.timestep.reset();
+  else { const d = this.timestep.advance(s);
+         for (let h = 0; h < d; h++) this.game.step(Uf); }
+  const c = this.game.renderSnapshot(this.timestep.alpha);
+```
+
+Two consequences:
+
+- **Steps are batched.** `advance()` returns a count, so a single animation frame
+  runs a variable number of simulation steps — about 2 per frame at 60 Hz. Any
+  controller driven by its own rAF loop would desynchronise from the accumulator,
+  firing once while the simulation advanced twice. Hooking `step` instead yields
+  exactly one decision per simulation step regardless of batching.
+- **`this.game.step(Uf)` is a property lookup at call time**, and a bundle scan
+  for captured references (`x.step.bind(...)`, `const f = x.step`) returns none.
+  Instance patching therefore intercepts the real calls. This is verified, not
+  assumed, and it is the load-bearing assumption of the Actuation section.
+
+### Pipe kinematics
+
+Measured on a headless instance at `dt = 1/120`:
+
+| Quantity | Value |
+|---|---|
+| Pipe-to-pipe spacing | **201 steps** (~1.68 s) |
+| Spawn → scoring transit | **240 steps** (~2.0 s) |
+| Spawn x | 1253049 |
+| First spawn | step 257 |
+
+The 201-step spacing sets the required lookahead horizon. See "Search".
+
+### Tab visibility
+
+The game does not advance while the tab is hidden: `visibilitychange` handling
+sets `paused`, and rAF is suspended regardless. Verified — a run started in a
+hidden tab sat in `state: "play"` at `playStep: 0` indefinitely. The bot
+therefore only operates on a visible tab. This is acceptable (a human player has
+the same constraint) but means benchmark and measurement runs cannot be performed
+in a background tab.
 
 ### A fresh instance runs headless and inert
 
@@ -81,8 +130,9 @@ complete game — pipes spawn, score increments, `state` reaches `"gameover"`,
 `deathCause` populates (`"pipeTop"` / `"pipeBottom"`). The instance reports
 `isRanked === false` and performs no network activity.
 
-A naive "flap if `birdY` below `gapY`" policy scored **1–2** on this harness.
-That is the baseline the real controller must beat.
+A naive "flap if `birdY` below `gapY`" policy, run at the correct `dt = 1/120`
+across five seeds, scored **1, 1, 1, 4, 2**. That is the baseline the real
+controller must beat.
 
 ### Online ranked leaderboard
 
@@ -182,33 +232,62 @@ live PRNG state spawns the *actual* upcoming pipes.
 
 ### Search
 
-Beam search over per-step decisions. **The search runs on every simulation step,
-and only the first action of the resulting plan is ever used** — the plan is
-discarded and recomputed next step, making the controller fully closed-loop.
-There is no plan-execution buffer and no skipped steps.
+Beam search over per-step decisions, producing a **plan**: a sequence of actions
+over the horizon.
 
 - Node: `{ clone, stepsAhead }`
 - Each node branches into `{ flap, no-flap }`; rank all successors; keep best K
 - Prune any branch reaching `state === "gameover"`
 - Rank: alive first, then by `|birdY - gapY|` against the next unpassed pipe
-- If every branch dies, return the first action of the longest-surviving branch
+- If every branch dies, take the longest-surviving branch
 
-**Budget.** Measured on the live page 2026-08-06: a clone plus one step costs
-**0.61 µs**; a bare step on an existing clone costs **0.15 µs**. A K = 24,
-D = 80 beam is ≈3,840 expansions ≈ **2.3 ms per re-plan**. That fits within a
-16.7 ms frame at 60 Hz, and still within 8.3 ms at 120 Hz, with wide margin
-either way — which is why searching every step is affordable and no cadence
-reduction is required.
+**Horizon.** D must cover at least one pipe-to-pipe spacing (201 steps), or the
+controller commits to clearing the current gap while blind to the next one —
+the exact failure mode a greedy policy dies to. **D = 240** (2.0 s) gives one
+full spacing plus margin. An earlier revision specified D = 80, which was
+derived from the incorrect 0.05 timestep and covers only 40% of a spacing.
 
-The live step rate was deliberately not measured: the game only steps during
-play, and the live instance is `netMode: "online"`, so starting a run to measure
-it would have produced a ranked, submitted score. The 60 Hz worst case is used
-instead, and the real figure should be recorded the first time the bot is armed.
+### Plan-and-verify, not search-every-step
 
-K and D are tuning knobs to be validated against measurement, not fixed
-architecture. Note that the dominant cost is cloning (0.61 µs), not stepping
-(0.15 µs), so a clone object pool is the first optimisation to reach for if the
-budget ever tightens — not a shallower search.
+**The plan is computed once and executed over many steps.** Re-planning every
+step is not merely unaffordable — it is redundant.
+
+The forward model is *exact*. The clone carries live PRNG state, so the search
+observes the true future, and nothing external perturbs the simulation between
+steps. A plan optimal at step *T* is therefore still optimal at *T+1*; a
+per-step re-plan recomputes a bit-identical answer at full cost.
+
+The drift check (below) is what licenses this. It is not a diagnostic here — it
+is the correctness guard. If prediction and reality ever disagree, the exactness
+premise has failed and the plan is immediately discarded.
+
+Re-plan when, and only when:
+
+- the plan falls below a low-water mark of remaining steps (re-plan early, so
+  there is always runway and re-plans stay staggered)
+- the drift check fires
+- the run state changes (new run, `restart()`)
+
+**Budget.** Measured 2026-08-06: clone plus one step **0.61 µs**; bare step
+**0.15 µs**. A K = 24, D = 240 beam is ≈11,520 expansions ≈ **7 ms per search**.
+
+At 120 steps/s, searching every step would cost ~840 ms per second of wall clock
+— 84% of a core, and unshippable. Under plan-and-verify the same search runs
+roughly once per 180 steps (~1.5 s), amortising to well under 1% of a core. The
+per-step cost in steady state is one clone, one step, and one comparison for the
+drift check.
+
+Because the 7 ms search is bursty rather than continuous, it must not land inside
+a frame that also owes 2 accumulator steps. Re-planning at a low-water mark
+rather than at exhaustion is what gives the scheduler slack to place it.
+
+**Clone pooling is required, not optional.** Cloning (0.61 µs) dominates stepping
+(0.15 µs) by 4×, so the search cost is mostly allocation. A pool of reusable
+clone objects is the highest-leverage optimisation available and should be built
+in from the start rather than retrofitted if the budget tightens.
+
+K and D remain tuning knobs to be validated against the benchmark, not fixed
+architecture.
 
 ### Actuation
 
@@ -219,16 +298,25 @@ live.step = function (dt) { controller.tick(this); return proto.step.call(this, 
 ```
 
 This runs the controller immediately before each real simulation step, giving
-exact frame synchronisation with no added latency. Patching the prototype would
-be a defect: every clone inside the search would recursively invoke the
-controller.
+exact synchronisation with no added latency — including when the accumulator
+batches several steps into one animation frame, where a rAF-driven controller
+would fire once for two or three steps.
+
+Verified against the bundle: the drive loop calls `this.game.step(Uf)` by
+property lookup and holds no captured reference, so an instance patch does
+intercept it.
+
+Patching the prototype would be a defect: every clone inside the search would
+recursively invoke the controller.
 
 ### Control loop by game state
 
-- `"getready"` — call `live.flap()` to start the run
-- `"play"` — run the search, and call `live.flap()` if the chosen first action is
-  a flap. No other actuation path exists; `flap()` is the only input the bot uses
-- `"gameover"` — call `live.restart()` if the popup's auto-restart toggle is on
+- `"getready"` — call `live.flap()` to start the run; invalidate any stale plan
+- `"play"` — run the drift check; re-plan if required (see "Plan-and-verify");
+  pop the next action from the plan and call `live.flap()` if it is a flap.
+  No other actuation path exists; `flap()` is the only input the bot uses
+- `"gameover"` — discard the plan; call `live.restart()` if the popup's
+  auto-restart toggle is on
 
 All gated on the armed flag; disarming restores the original `step`.
 
@@ -238,44 +326,62 @@ All gated on the armed flag; disarming restores the original `step`.
 |---|---|---|
 | `window.__game` absent or renamed | Feature detection at init | Refuse to arm; HUD error |
 | `flap` / `step` missing from prototype | Feature detection at init | Refuse to arm; HUD error |
-| Site ships new physics (`simVersion` bump) | Drift check | HUD warning; optional auto-disarm |
-| Search exceeds frame budget | Timing measurement | Reduce beam width K for that tick; never freeze |
+| Site ships new physics (`simVersion` bump) | Drift check | Discard plan; HUD warning; disarm on persistent drift |
+| Search exceeds frame budget | Clock check between depth levels | Narrow K in flight; never truncate D; never freeze |
+| Tab hidden mid-run | `visibilitychange` / `paused` | Game freezes on its own; plan stays valid, resume on visible |
 | All search branches die | Search result | Longest-surviving branch |
 
 ### Budget overrun
 
 The search checks the clock **between depth levels** and narrows K in flight.
-Detection cannot happen after the fact — a tick that has already overrun is a
+Detection cannot happen after the fact — a search that has already overrun is a
 frame that has already been missed — so the budget check is part of the search
 loop's structure, not a wrapper around it.
 
-Degradation reduces the beam width K for that tick and keeps the same algorithm.
-It never switches to a different policy. A narrower beam is still a search over
-the true dynamics and degrades smoothly; falling back to a hand-tuned reactive
-rule would mean falling back to something that scores 1–2, which is
+Narrowing K mid-search is preferable to truncating D: a shallower plan is blind
+past the next gap (see "Horizon"), whereas a narrower beam still spans the full
+horizon with fewer alternatives considered. Depth is correctness; width is
+quality.
+
+Degradation never switches to a different policy. A narrower beam is still a
+search over the true dynamics and degrades smoothly; falling back to a hand-tuned
+reactive rule would mean falling back to something that scores 1–4, which is
 indistinguishable from a crash.
 
 ### Drift check
 
 Each tick, compare the clone's predicted `birdY` after one step against the value
-the live game actually produces. These should agree exactly. Divergence means the
-forward model no longer matches the game, and is surfaced in the HUD rather than
-allowed to degrade play silently. This is the primary defence against the site
-updating underneath us, and it is what converts a silent break into a visible
-one — necessary because `Ctor` is reached through a hash-named bundle class.
+the live game actually produces. These should agree exactly.
+
+The check carries two distinct jobs:
+
+1. **Correctness guard for plan reuse.** Plan-and-verify is sound only while the
+   forward model is exact. The drift check is the test of that premise, run every
+   step. On divergence the plan is discarded immediately and a re-plan is forced.
+   Without this check, reusing a plan would be an assumption; with it, the
+   assumption is continuously verified. This is why the per-step cost is one
+   clone and one step rather than zero — the verification is the point.
+2. **Site-update detection.** Divergence also means the game's physics changed
+   underneath us. Surfaced in the HUD rather than allowed to degrade play
+   silently — necessary because `Ctor` is reached through a hash-named bundle
+   class that any deploy may rename.
+
+Persistent drift (divergence on consecutive steps, rather than a one-off) should
+disarm rather than thrash between re-plans that all immediately fail.
 
 ## Testing
 
 The controller is a pure function `(state) => boolean` over a deterministic,
 headless simulation, so correctness is measurable rather than eyeballed.
 
-**All tests run in the MAIN world on the page.** They cannot run in a Web Worker
-or in Node: the simulation class is obtained as
+**All tests run in the MAIN world on the page, in a visible tab.** They cannot
+run in a Web Worker or in Node: the simulation class is obtained as
 `Object.getPrototypeOf(__game).constructor` from the live page, and a class
 cannot cross a `postMessage` boundary (structured clone rejects functions). The
 "runs headless and inert" finding was verified in the MAIN world specifically.
-Benchmark runs are therefore chunked across `requestAnimationFrame` callbacks so
-a long batch never blocks the page.
+Benchmark runs are chunked across `requestAnimationFrame` callbacks so a long
+batch never blocks the page — which also means a hidden tab suspends the
+benchmark, since rAF is throttled to a halt (see "Tab visibility").
 
 **Imposing a seed.** `beginRun()` does `this.runSeed = this.nextSeed ?? gS()`, so
 a test fixes its seed by assigning `sim.nextSeed = <bigint>` *before* calling
@@ -283,11 +389,17 @@ a test fixes its seed by assigning `sim.nextSeed = <bigint>` *before* calling
 directly is overwritten by the next `beginRun()`.
 
 - **Benchmark mode** — run ~100 games on fixed seeds; report a score histogram.
-  Beats the naive baseline of 1–2 or it is not working. **Each game must carry a
+  Beats the naive baseline of 1–4 or it is not working. **Each game must carry a
   cutoff** (a max-step cap, or a target score), and reaching the cutoff counts as
   a pass. A correct controller does not lose, so an uncapped benchmark hangs
-  exactly when the code is working — and at ~2.3 ms of search per step, even a
-  moderate game costs seconds of wall clock.
+  exactly when the code is working. Budget the cap deliberately: at 120 steps/s,
+  a score of 50 is ~10,000 steps, and every step costs a clone plus a step for
+  the drift check even when no re-plan is triggered.
+- **Plan-reuse equivalence** — the load-bearing claim of plan-and-verify is that
+  re-planning every step yields the same actions as executing a cached plan.
+  Assert it directly: run a seed under both policies and require identical action
+  sequences. If this fails, the exactness premise is wrong and the whole design
+  needs revisiting.
 - **Regression** — fixed seed implies fixed expected score; assert a threshold.
 - **Clone fidelity** — clone a live mid-run state, step both clone and original,
   assert identical `birdY` / `birdVy` / `pipes`.
@@ -298,6 +410,13 @@ directly is overwritten by the next `beginRun()`.
 
 - The beam ranking heuristic could prune the uniquely correct branch. The
   benchmark is how this would be detected; beam width is the mitigation.
+- Plan-and-verify rests on the forward model being exact. The drift check guards
+  it at runtime and the plan-reuse equivalence test guards it at build time, but
+  if some input to the simulation is not captured by the clone, both the plan and
+  the search would be wrong together and agree with each other. The clone
+  fidelity test over a long horizon is the defence.
+- K = 24 and D = 240 are unvalidated starting values. D = 240 is grounded in the
+  measured 201-step pipe spacing; K = 24 is a guess pending the benchmark.
 - `Ctor` is obtained via `Object.getPrototypeOf(__game).constructor`, a
   hash-named bundle class. Covered by feature detection plus the drift check.
 - `"world": "MAIN"` requires Chrome 111+.
