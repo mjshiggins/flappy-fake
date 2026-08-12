@@ -47,6 +47,22 @@ describe('beamSearch', () => {
     expect(r.actions.length).toBeLessThanOrEqual(15);
   });
 
+  it('reports the narrowed beam width when the deadline is exceeded', () => {
+    // With an already-elapsed deadline, width halves each depth (K -> ... -> 2).
+    // minWidth exposes that so a caller can tell the plan was produced under a
+    // collapsed beam -- the live condition the fixed-budget benchmark misses.
+    const ops = makeFakeOps();
+    let t = 0;
+    const r = beamSearch(ops.initial(), ops, { K: 8, D: 30, deadline: 0, now: () => (t += 10) });
+    expect(r.minWidth).toBeLessThan(8);
+  });
+
+  it('reports full width when never budget-limited', () => {
+    const ops = makeFakeOps();
+    const r = beamSearch(ops.initial(), ops, { K: 8, D: 30 });
+    expect(r.minWidth).toBe(8);
+  });
+
   it('releases every outstanding clone, including the surviving beam', () => {
     // fakeSim's own release() is a no-op, so it can't detect a leak on its
     // own: wrap it with a counter that tracks cloneFrom/release calls.

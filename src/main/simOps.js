@@ -34,6 +34,10 @@ export function makeSimOps(Ctor, { dt = DT } = {}) {
     step: (c) => c.step(dt),
     isDead: (c) => c.state === 'gameover',
     birdY: (c) => c.birdY,
+    // For trajectory preview only (see trajectory.js): pipeScroll is the bird's
+    // world x, and pipeScroll + pipe.x is a pipe's fixed world x.
+    birdX: (c) => c.pipeScroll,
+    pipes: (c) => c.pipes,
     rank(c) {
       // Select by PHYSICAL CLEARANCE, not by `passed`. `passed` is a scoring
       // flag set the instant a pipe reaches x <= 0, but the pipe has width and

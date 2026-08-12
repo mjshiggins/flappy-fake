@@ -48,4 +48,19 @@ describe('Planner', () => {
     const p = new Planner(ops, cfg);
     expect(typeof p.nextAction(ops.initial())).toBe('boolean');
   });
+
+  it('counts exhausted replans and clears lastExhausted on invalidate', () => {
+    // A doomed root (near the ceiling with high upward velocity) has no
+    // survivable plan, so the first replan is exhausted. lastExhausted must NOT
+    // then linger across a run boundary -- invalidate() (called on gameover /
+    // getready) has to clear it, or the HUD keeps showing a stale warning.
+    const ops = makeFakeOps();
+    const p = new Planner(ops, { K: 4, D: 40, R: 10, pipeSpacing: 20 });
+    p.nextAction({ y: 295, vy: 50, t: 0, dead: false });
+    expect(p.lastExhausted).toBe(true);
+    expect(p.exhaustedReplans).toBe(1);
+    p.invalidate();
+    expect(p.lastExhausted).toBe(false);
+    expect(p.exhaustedReplans).toBe(1); // cumulative diagnostic, not reset
+  });
 });

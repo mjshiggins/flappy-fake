@@ -22,6 +22,11 @@ export class Planner {
     this.idx = 0;
     this.replanCount = 0;
     this.lastExhausted = false;
+    // Cumulative diagnostics for "why is the search exhausting so much": how
+    // many replans returned no full-horizon survivor, and how many ran under a
+    // budget-narrowed beam. Not reset by invalidate() -- they measure a run.
+    this.exhaustedReplans = 0;
+    this.narrowedReplans = 0;
   }
 
   nextAction(liveState, { drift = false, stateChanged = false } = {}) {
@@ -38,9 +43,13 @@ export class Planner {
     const r = beamSearch(liveState, this.ops, { K, D, deadline, now });
     this.plan = r.actions;
     this.lastExhausted = r.exhausted;
+    if (r.exhausted) this.exhaustedReplans += 1;
+    if (r.minWidth < K) this.narrowedReplans += 1;
     this.idx = 0;
     this.replanCount += 1;
   }
 
-  invalidate() { this.plan = null; this.idx = 0; }
+  // Clears the CURRENT status (lastExhausted) so it cannot linger on the HUD
+  // across a run boundary; the cumulative counters are deliberately preserved.
+  invalidate() { this.plan = null; this.idx = 0; this.lastExhausted = false; }
 }

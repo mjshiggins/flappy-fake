@@ -9,7 +9,12 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
  * spawn 5 (halfGap plateaus at 246415, spacing constant at 201), so clearing
  * ~20 pipes exercises the same parameters the controller faces indefinitely.
  */
-export async function runBenchmark(Ctor, ops, { games = 20, maxScore = 25, maxSteps = 20000, K, D, R } = {}) {
+export async function runBenchmark(Ctor, ops, { games = 20, maxScore = 25, maxSteps = 20000, K, D, R, budgetMs = null, now } = {}) {
+  // A real clock is required for budgetMs to bite; the Planner default now()===0
+  // never trips a deadline. Pass budgetMs: 12 to reproduce the LIVE controller
+  // and measure the budget-narrowing that the (previously unbudgeted) benchmark
+  // could not see. Leave budgetMs: null for the unlimited-search baseline.
+  const clock = now ?? (typeof performance !== 'undefined' ? () => performance.now() : () => Date.now());
   const results = [];
   for (let i = 0; i < games; i++) {
     await nextFrame();
@@ -18,21 +23,33 @@ export async function runBenchmark(Ctor, ops, { games = 20, maxScore = 25, maxSt
     sim.beginRun();
     sim.flap();                          // enter "play"
 
-    const planner = new Planner(ops, { K, D, R, pipeSpacing: PIPE_SPACING });
+    const planner = new Planner(ops, { K, D, R, pipeSpacing: PIPE_SPACING, budgetMs, now: clock });
     let steps = 0;
     while (steps < maxSteps && sim.state !== 'gameover' && sim.score < maxScore) {
       if (planner.nextAction(sim)) sim.flap();
       sim.step(DT);
       steps += 1;
     }
-    results.push({ seed: i + 1, score: sim.score, steps, cutoff: sim.score >= maxScore });
+    results.push({
+      seed: i + 1, score: sim.score, steps, cutoff: sim.score >= maxScore,
+      replans: planner.replanCount,
+      exhaustedReplans: planner.exhaustedReplans,
+      narrowedReplans: planner.narrowedReplans,
+    });
   }
   const scores = results.map((r) => r.score);
+  const sum = (f) => results.reduce((a, r) => a + f(r), 0);
+  const totalReplans = sum((r) => r.replans);
   return {
     results,
     min: Math.min(...scores),
     median: scores.slice().sort((a, b) => a - b)[scores.length >> 1],
     cutoffRate: results.filter((r) => r.cutoff).length / results.length,
+    // The two numbers that answer "why so much exhausted": what fraction of
+    // replans found no full-horizon survivor, and what fraction ran under a
+    // budget-collapsed beam. Compare budgetMs: 12 vs null to isolate the cause.
+    exhaustedRate: totalReplans ? sum((r) => r.exhaustedReplans) / totalReplans : 0,
+    narrowedRate: totalReplans ? sum((r) => r.narrowedReplans) / totalReplans : 0,
     halfGapFloor: HALF_GAP_FLOOR,
   };
 }

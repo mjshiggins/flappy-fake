@@ -5,6 +5,7 @@ import { beamSearch } from './search.js';
 import { Planner } from './planner.js';
 import { D, R, K, PIPE_SPACING } from '../shared/constants.js';
 import { mountHud } from './hud.js';
+import { planTrajectory } from './trajectory.js';
 import { runBenchmark, sweepK, cloneFidelity, planReuseCost } from './benchmark.js';
 
 function boot() {
@@ -14,9 +15,11 @@ function boot() {
   // Declared before mountHud so the HUD's callbacks can close over it; the
   // controller cannot be constructed until feature detection has passed.
   let controller = null;
+  let showPlan = false;
   const hud = mountHud({
     onArm: (v) => { if (controller) controller.armed = v; },
     onAutoRestart: (v) => { if (controller) controller.autoRestart = v; },
+    onTogglePlan: (v) => { showPlan = v; },
   });
 
   if (!info.ok) {
@@ -54,14 +57,27 @@ function boot() {
   setInterval(() => {
     hud.update({
       armed: controller.armed,
-      status: controller.status,
-      score: game.score,
       isRanked: game.isRanked,        // read-only indicator; mutates nothing
       replans: controller.planner.replanCount,
       driftEvents: controller.driftEvents,
-      exhausted: controller.planner.lastExhausted,
     });
+    if (showPlan) hud.drawPlan(previewTrajectory());
   }, 250);
+
+  // Preview the plan the bot will actually execute next: the cached plan from
+  // the current index onward. When no plan is cached (disarmed, between runs),
+  // fall back to a fresh search so the preview is never empty.
+  function previewTrajectory() {
+    try {
+      const p = controller.planner;
+      const actions = p.plan && p.idx < p.plan.length
+        ? p.plan.slice(p.idx)
+        : beamSearch(game, ops, { K, D }).actions;
+      return planTrajectory(game, ops, actions);
+    } catch {
+      return null;
+    }
+  }
 }
 
 if (window.__game) boot();
