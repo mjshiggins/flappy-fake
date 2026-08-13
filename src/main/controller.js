@@ -1,5 +1,6 @@
 import { Planner } from './planner.js';
 import { DriftCheck } from './drift.js';
+import { planTrajectory } from './trajectory.js';
 
 /** Per-tick orchestration. Runs immediately before each real simulation step. */
 export class Controller {
@@ -14,6 +15,7 @@ export class Controller {
     this.status = 'ok';
     this.lastState = null;
     this.driftEvents = 0;
+    this.lastDeath = null;
   }
 
   tick(live) {
@@ -32,13 +34,16 @@ export class Controller {
     }
 
     if (state === 'getready') {
-      this.planner.invalidate();
+      this.lastDeath = null;
+      this.planner.resetRun();
       this.drift.reset();
+      this.driftEvents = 0;
       this.api.flap();
       return;
     }
 
     if (state === 'gameover') {
+      if (stateChanged) this.#snapshotDeath(live);
       this.planner.invalidate();
       this.drift.reset();
       if (this.autoRestart) this.api.restart();
@@ -51,5 +56,35 @@ export class Controller {
     // not a double-flap bug: flap() assigns velocity absolutely rather than
     // adding an impulse, so applying it to the clone reproduces live exactly.
     this.drift.predict(live, action);
+  }
+
+  #snapshotDeath(live) {
+    const p = this.planner;
+    const remaining = p.plan && p.idx < p.plan.length ? p.plan.slice(p.idx) : [];
+    const pipes = Array.isArray(live.pipes)
+      ? live.pipes.map((q) => ({ x: q.x, gapY: q.gapY, halfGap: q.halfGap, passed: q.passed }))
+      : [];
+    let traj = null;
+    try { traj = planTrajectory(live, this.ops, remaining); } catch { /* fake/partial ops */ }
+    this.lastDeath = {
+      deathCause: live.deathCause ?? null,
+      score: live.score ?? null,
+      playStep: live.playStep ?? null,
+      spawnCount: live.spawnCount ?? null,
+      birdY: this.ops.birdY(live),
+      birdVy: live.birdVy ?? null,
+      pipeScroll: live.pipeScroll ?? null,
+      pipes,
+      plan: remaining,
+      replans: p.replanCount,
+      exhaustedReplans: p.exhaustedReplans,
+      narrowedReplans: p.narrowedReplans,
+      lastExhausted: p.lastExhausted,
+      lastMinWidth: p.lastMinWidth,
+      driftEvents: this.driftEvents,
+      visibilityState: typeof document !== 'undefined' ? document.visibilityState : null,
+      runSeed: live.runSeed != null ? String(live.runSeed) : null,
+      traj,
+    };
   }
 }

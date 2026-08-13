@@ -22,9 +22,11 @@ export class Planner {
     this.idx = 0;
     this.replanCount = 0;
     this.lastExhausted = false;
+    this.lastMinWidth = null;
     // Cumulative diagnostics for "why is the search exhausting so much": how
     // many replans returned no full-horizon survivor, and how many ran under a
     // budget-narrowed beam. Not reset by invalidate() -- they measure a run.
+    // resetRun() (getready) zeros them so the HUD is per-run, not per-page.
     this.exhaustedReplans = 0;
     this.narrowedReplans = 0;
   }
@@ -43,6 +45,7 @@ export class Planner {
     const r = beamSearch(liveState, this.ops, { K, D, deadline, now });
     this.plan = r.actions;
     this.lastExhausted = r.exhausted;
+    this.lastMinWidth = r.minWidth;
     if (r.exhausted) this.exhaustedReplans += 1;
     if (r.minWidth < K) this.narrowedReplans += 1;
     this.idx = 0;
@@ -52,4 +55,21 @@ export class Planner {
   // Clears the CURRENT status (lastExhausted) so it cannot linger on the HUD
   // across a run boundary; the cumulative counters are deliberately preserved.
   invalidate() { this.plan = null; this.idx = 0; this.lastExhausted = false; }
+
+  // The HUD preview must render THIS, never kick off a second beam search.
+  // An empty/exhausted plan returns null so the overlay shows "no plan"
+  // instead of a 12ms+ unbounded search on the main thread.
+  remainingActions() {
+    if (this.plan && this.idx < this.plan.length) return this.plan.slice(this.idx);
+    return null;
+  }
+
+  // New run: drop the plan AND the per-run counters.
+  resetRun() {
+    this.invalidate();
+    this.replanCount = 0;
+    this.exhaustedReplans = 0;
+    this.narrowedReplans = 0;
+    this.lastMinWidth = null;
+  }
 }

@@ -49,6 +49,50 @@ describe('Planner', () => {
     expect(typeof p.nextAction(ops.initial())).toBe('boolean');
   });
 
+  it('remainingActions is the unexecuted tail, and null when there is no plan', () => {
+    const ops = makeFakeOps();
+    const p = new Planner(ops, cfg);
+    expect(p.remainingActions()).toBeNull();
+    p.nextAction(ops.initial());
+    expect(p.remainingActions()).toEqual(p.plan.slice(p.idx));
+    p.invalidate();
+    expect(p.remainingActions()).toBeNull();
+  });
+
+  it('remainingActions is null for an exhausted empty plan, not a cue to search again', () => {
+    const ops = makeFakeOps();
+    const p = new Planner(ops, { K: 4, D: 40, R: 10, pipeSpacing: 20 });
+    p.nextAction({ y: 295, vy: 50, t: 0, dead: false });
+    p.plan = [];
+    p.idx = 0;
+    expect(p.remainingActions()).toBeNull();
+  });
+
+  it('records lastMinWidth from a budget-narrowed search', () => {
+    const ops = makeFakeOps();
+    let t = 0;
+    const p = new Planner(ops, {
+      K: 8, D: 30, R: 10, pipeSpacing: 20,
+      budgetMs: 0, now: () => ++t,
+    });
+    p.nextAction(ops.initial());
+    expect(p.lastMinWidth).toBe(4);
+    expect(p.narrowedReplans).toBe(1);
+  });
+
+  it('resetRun zeros run counters and clears the plan', () => {
+    const ops = makeFakeOps();
+    const p = new Planner(ops, cfg);
+    p.nextAction(ops.initial());
+    expect(p.replanCount).toBe(1);
+    p.resetRun();
+    expect(p.replanCount).toBe(0);
+    expect(p.exhaustedReplans).toBe(0);
+    expect(p.narrowedReplans).toBe(0);
+    expect(p.lastMinWidth).toBeNull();
+    expect(p.plan).toBeNull();
+  });
+
   it('counts exhausted replans and clears lastExhausted on invalidate', () => {
     // A doomed root (near the ceiling with high upward velocity) has no
     // survivable plan, so the first replan is exhausted. lastExhausted must NOT

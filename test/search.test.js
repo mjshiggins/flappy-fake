@@ -48,13 +48,22 @@ describe('beamSearch', () => {
   });
 
   it('reports the narrowed beam width when the deadline is exceeded', () => {
-    // With an already-elapsed deadline, width halves each depth (K -> ... -> 2).
-    // minWidth exposes that so a caller can tell the plan was produced under a
-    // collapsed beam -- the live condition the fixed-budget benchmark misses.
+    // With an already-elapsed deadline, width halves once. minWidth exposes
+    // that so a caller can tell the plan was produced under a reduced beam.
     const ops = makeFakeOps();
     let t = 0;
     const r = beamSearch(ops.initial(), ops, { K: 8, D: 30, deadline: 0, now: () => (t += 10) });
     expect(r.minWidth).toBeLessThan(8);
+  });
+
+  it('does not keep halving after the deadline has already been missed', () => {
+    // now() is past the deadline at every depth. Repeated >>1 would collapse
+    // K=8 to 2 within three levels, then search the rest of the horizon —
+    // including the next pipe — at width 2. One in-flight narrow leaves K/2.
+    const ops = makeFakeOps();
+    const r = beamSearch(ops.initial(), ops, { K: 8, D: 30, deadline: 0, now: () => 1 });
+    expect(r.minWidth).toBe(4);
+    expect(r.exhausted).toBe(false);
   });
 
   it('reports full width when never budget-limited', () => {

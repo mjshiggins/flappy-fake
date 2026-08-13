@@ -18,5 +18,7 @@ export function makeFakeOps({ gapAt = () => 0, halfGap = 80 } = {}) {
     isDead: (s) => s.dead,
     rank: (s) => Math.abs(s.y - gapAt(s.t)),
     birdY: (s) => s.y,
+    birdX: (s) => s.t ?? 0,
+    pipes: (s) => s.pipes ?? [],
   };
 }

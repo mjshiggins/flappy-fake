@@ -45,6 +45,7 @@ function boot() {
     // exposed for diagnosis: reimplementing the search in a console snippet is
     // error-prone (a double-release corrupts the clone pool silently)
     beamSearch, Planner,
+    get lastDeath() { return controller.lastDeath; },
   };
 
   // Instance patch, NOT prototype: clones inside the search must not recurse.
@@ -54,25 +55,37 @@ function boot() {
     return protoStep.call(this, dt);
   };
 
+  let loggedDeath = null;
   setInterval(() => {
+    const death = controller.lastDeath;
     hud.update({
       armed: controller.armed,
       isRanked: game.isRanked,        // read-only indicator; mutates nothing
       replans: controller.planner.replanCount,
+      exhaustedReplans: controller.planner.exhaustedReplans,
+      narrowedReplans: controller.planner.narrowedReplans,
       driftEvents: controller.driftEvents,
+      deathCause: death?.deathCause,
     });
     if (showPlan) hud.drawPlan(previewTrajectory());
+    if (death && death !== loggedDeath) {
+      loggedDeath = death;
+      const { traj: _traj, ...rest } = death;
+      console.warn('[flappy-fake] death', rest);
+    }
   }, 250);
 
-  // Preview the plan the bot will actually execute next: the cached plan from
-  // the current index onward. When no plan is cached (disarmed, between runs),
-  // fall back to a fresh search so the preview is never empty.
+  // Preview the cached plan only. A previous fallback ran an unbounded
+  // beamSearch whenever the plan was empty — the exact moment a hard gap
+  // exhausts the controller — so toggling "show plan" stole a full search
+  // every 250ms on the main thread and the bot died.
   function previewTrajectory() {
     try {
-      const p = controller.planner;
-      const actions = p.plan && p.idx < p.plan.length
-        ? p.plan.slice(p.idx)
-        : beamSearch(game, ops, { K, D }).actions;
+      if (game.state === 'gameover' && controller.lastDeath?.traj) {
+        return controller.lastDeath.traj;
+      }
+      const actions = controller.planner.remainingActions();
+      if (!actions) return null;
       return planTrajectory(game, ops, actions);
     } catch {
       return null;

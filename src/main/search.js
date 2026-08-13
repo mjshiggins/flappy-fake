@@ -33,7 +33,12 @@ export function beamSearch(rootState, ops, { K, D, deadline = null, now = () => 
 
     // Budget check BETWEEN depth levels: narrow K in flight, never truncate D.
     // Depth is correctness (horizon invariant); width is only quality.
-    if (deadline !== null && now() > deadline) width = Math.max(2, width >> 1);
+    // Narrow ONCE. The deadline stays missed for every later depth, so a
+    // repeated >>1 collapses K to 2 within four levels and searches the
+    // rest of the horizon — including the next pipe — at width 2.
+    if (deadline !== null && now() > deadline && width === K) {
+      width = Math.max(2, width >> 1);
+    }
     if (width < minWidth) minWidth = width;
 
     for (let i = width; i < next.length; i++) ops.release(next[i].state);

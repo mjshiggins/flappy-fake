@@ -29,6 +29,56 @@ describe('Controller', () => {
     expect(h.live.flaps).toBe(0);
   });
 
+  it('snapshots death diagnostics before invalidating the plan', () => {
+    const h = harness('play');
+    h.live.deathCause = 'pipeTop';
+    h.live.score = 132;
+    h.live.playStep = 26914;
+    h.live.pipeScroll = 450738612;
+    h.live.birdY = 900000;
+    h.live.pipes = [{ x: 204649, gapY: 671092, halfGap: 246415, passed: false }];
+    h.c.tick(h.live);
+    const remaining = h.c.planner.plan.slice(h.c.planner.idx);
+    h.live.state = 'gameover';
+    h.c.tick(h.live);
+    expect(h.c.planner.plan).toBeNull();
+    expect(h.c.lastDeath.deathCause).toBe('pipeTop');
+    expect(h.c.lastDeath.score).toBe(132);
+    expect(h.c.lastDeath.playStep).toBe(26914);
+    expect(h.c.lastDeath.plan).toEqual(remaining);
+    expect(h.c.lastDeath.pipes).toEqual([
+      { x: 204649, gapY: 671092, halfGap: 246415, passed: false },
+    ]);
+    expect(h.c.lastDeath.replans).toBeGreaterThan(0);
+    expect(h.c.lastDeath.traj).toBeTruthy();
+  });
+
+  it('does not overwrite lastDeath on later gameover ticks', () => {
+    const h = harness('play');
+    h.live.deathCause = 'pipeTop';
+    h.c.tick(h.live);
+    h.live.state = 'gameover';
+    h.c.tick(h.live);
+    const first = h.c.lastDeath;
+    h.live.deathCause = 'ground';
+    h.c.tick(h.live);
+    expect(h.c.lastDeath).toBe(first);
+    expect(h.c.lastDeath.deathCause).toBe('pipeTop');
+  });
+
+  it('clears lastDeath and run counters on getready', () => {
+    const h = harness('play');
+    h.live.deathCause = 'pipeTop';
+    h.c.tick(h.live);
+    h.live.state = 'gameover';
+    h.c.tick(h.live);
+    expect(h.c.lastDeath).not.toBeNull();
+    h.live.state = 'getready';
+    h.c.tick(h.live);
+    expect(h.c.lastDeath).toBeNull();
+    expect(h.c.planner.replanCount).toBe(0);
+  });
+
   it('invalidates the plan on gameover', () => {
     const h = harness('play');
     h.c.tick(h.live);

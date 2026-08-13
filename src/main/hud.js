@@ -12,6 +12,22 @@ const HUD_WIDTH = 240;
 const CANVAS_H = 130;
 const HIDE_KEY = 'h';
 
+/** Fixed four-line status so the panel never resizes as diagnostics toggle. */
+export function formatHudBody(s) {
+  const replans = s.replans ?? 0;
+  const ex = s.exhaustedReplans ?? 0;
+  const nar = s.narrowedReplans ?? 0;
+  const pct = (n) => (replans ? Math.round((100 * n) / replans) : 0);
+  const drift = s.driftEvents ? `   ⚠ drift x${s.driftEvents}` : '';
+  const death = s.deathCause ? `death    ${s.deathCause}` : 'death    —';
+  return [
+    `replans  ${replans}${drift}`,
+    `exhaust  ${ex} (${pct(ex)}%)`,
+    `narrow   ${nar} (${pct(nar)}%)`,
+    death,
+  ].join('\n');
+}
+
 export function mountHud({ onArm, onAutoRestart, onTogglePlan }) {
   const el = document.createElement('div');
   // A FIXED width (not min-width) plus border-box keeps the panel from
@@ -100,8 +116,7 @@ export function mountHud({ onArm, onAutoRestart, onTogglePlan }) {
     update(s) {
       armed = s.armed;
       paint();
-      const drift = s.driftEvents ? `   ⚠ drift x${s.driftEvents}` : '';
-      body.textContent = `replans  ${s.replans}${drift}`;
+      body.textContent = formatHudBody(s);
       // The colored border is the retained ranked indicator (the design doc's
       // one leaderboard mitigation): red while a run would submit, green while
       // it would not. Kept even though the text warning was removed.
