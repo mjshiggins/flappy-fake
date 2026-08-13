@@ -28,4 +28,14 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" flappy-fake-*.zip --generate-notes --title "$GITHUB_REF_NAME"
+        run: |
+          # GitHub's releases API occasionally 502s; retry before failing the job.
+          for i in 1 2 3 4 5; do
+            if gh release create "$GITHUB_REF_NAME" flappy-fake-*.zip \
+                --generate-notes --title "$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+            echo "gh release create failed (attempt $i); retrying in 15s..."
+            sleep 15
+          done
+          exit 1
