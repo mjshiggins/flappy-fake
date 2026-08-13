@@ -9,6 +9,21 @@ the extension drives the game's real dynamics forward and picks the action that
 survives. In control-theory terms this is **model predictive control** — a
 receding-horizon search re-planned continuously against an exact forward model.
 
+## Download and install
+
+Requires **Chrome 111+**. No Node or build tools needed.
+
+1. Download the latest `flappy-fake-*.zip` from the
+   [Releases](https://github.com/mjshiggins/flappy-fake/releases) page.
+2. Unzip it. (Chrome cannot install a zip directly — do not try to drag the zip
+   onto `chrome://extensions`.)
+3. Open `chrome://extensions`, enable **Developer mode** (top-right), click
+   **Load unpacked**, and select the unzipped folder (the one containing
+   `manifest.json`).
+4. Open <https://flappybird.io/>. The HUD appears in the top-left.
+
+The same zip is store-ready for a manual Chrome Web Store upload.
+
 ## How it works
 
 - **Exact state, exact physics.** `window.__game` is a live class instance
@@ -34,24 +49,18 @@ receding-horizon search re-planned continuously against an exact forward model.
 See [`docs/superpowers/specs/2026-08-06-flappy-bird-bot-design.md`](docs/superpowers/specs/2026-08-06-flappy-bird-bot-design.md)
 for the full design and recon findings.
 
-## Install (unpacked)
+## Install from source
 
-Requires **Chrome 111+** (the content script runs in the `MAIN` world).
+For local development (the content script runs in the `MAIN` world):
 
 ```bash
 npm install
 npm run build      # bundles src/main/index.js -> dist/main.js
 ```
 
-Then in Chrome:
-
-1. Open `chrome://extensions` and enable **Developer mode** (top-right).
-2. Click **Load unpacked** and select this project folder (the one containing
-   `manifest.json`).
-3. Open <https://flappybird.io/>. The HUD appears in the top-left.
-
-After changing code: `npm run build`, click **reload** on the extension card,
-then refresh the page.
+Then in Chrome: `chrome://extensions` → Developer mode → **Load unpacked** →
+select this project folder. After changing code: `npm run build`, click
+**reload** on the extension card, then refresh the page.
 
 ## Usage
 
@@ -74,7 +83,26 @@ controller, so there is no popup or message bridge):
 npm test           # run the vitest suite (Node, against a fake sim)
 npm run test:watch # watch mode
 npm run build      # produce dist/main.js
+npm run package    # build a store-ready flappy-fake-<version>.zip locally
 ```
+
+### Releasing
+
+CI runs tests and a build on every push/PR to `master`. To publish a downloadable
+release zip:
+
+1. Bump `"version"` in `manifest.json` if you want the source of truth to match
+   (the release workflow also forces the packaged version from the tag).
+2. Tag and push:
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+The Release workflow builds, packages `manifest.json` + `dist/main.js` +
+`icons/`, and attaches `flappy-fake-0.1.1.zip` to a
+[GitHub Release](https://github.com/mjshiggins/flappy-fake/releases).
 
 The search, planner, controller, and drift check are pure with respect to the
 game — everything goes through the `simOps` contract — so they are tested in Node

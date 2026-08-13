@@ -5,7 +5,8 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "package": "bash scripts/package.sh"
   },
   "devDependencies": {
     "esbuild": "^0.23.0",
